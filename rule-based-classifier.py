@@ -1,9 +1,10 @@
 import pandas as pd
 import re
 from sklearn.metrics import precision_score, recall_score, f1_score
+from collections import Counter
+import itertools
 
-
-df = pd.read_csv("completedata.csv")
+df = pd.read_csv("celebrities.csv")
 df.columns = df.columns.str.strip()
 df['final code'] = pd.to_numeric(df['Code'], errors='coerce')
 
@@ -442,3 +443,196 @@ true_negatives_df  = df[(df['actual_binary'] == 0) & (df['predicted_binary'] == 
 false_negatives_df.to_csv("false_negatives.csv", index=False)
 false_positives_df.to_csv("false_positives.csv", index=False)
 true_positives_df.to_csv("true_positives.csv", index=False)
+
+
+
+#more evaluation
+
+# Load the full annotated dataset (all rows with ground truth)
+misogynistic_df = df[df['actual_binary'] != 0].copy()
+non_misogynistic_df = df[df['actual_binary'] == 0].copy()
+
+# Finds words that appear disproportionately in misogynistic replies
+
+stopwords = {
+    'the','a','an','is','it','to','of','and','in','you','i','that','this',
+    'her','she','he','they','we','are','was','be','have','has','for','on',
+    'not','do','but','with','at','your','my','so','just','get','can','will',
+    'its','im','dont','youre','they','all','about','what','if','or','no',
+    'me','up','out','go','like','know','think','really','rt','amp','https'
+}
+
+def get_word_freq(texts):
+    words = []
+    for text in texts.dropna():
+        normalized = normalize_text(str(text))
+        words.extend(re.findall(r'\b[a-z]{3,}\b', normalized))
+    return Counter(w for w in words if w not in stopwords)
+
+misog_freq   = get_word_freq(misogynistic_df['Reply'])
+nonmisog_freq = get_word_freq(non_misogynistic_df['Reply'])
+
+total_misog    = sum(misog_freq.values())
+total_nonmisog = sum(nonmisog_freq.values())
+
+# Score = how much more common a word is in misogynistic vs non-misogynistic replies
+print("\n─── TOP UNIGRAMS IN MISOGYNISTIC REPLIES (vs non-misogynistic) ───")
+print(f"{'Word':<20} {'Misog%':>8} {'NonMisog%':>10} {'Ratio':>8} {'Count':>7}")
+print("─" * 60)
+
+word_scores = []
+for word, count in misog_freq.most_common(500):
+    if count < 3:
+        continue
+    misog_pct    = count / total_misog
+    nonmisog_pct = (nonmisog_freq.get(word, 0) + 1) / total_nonmisog  # +1 smoothing
+    ratio = misog_pct / nonmisog_pct
+    word_scores.append((word, count, misog_pct, nonmisog_pct, ratio))
+
+word_scores.sort(key=lambda x: x[4], reverse=True)
+for word, count, mp, nmp, ratio in word_scores[:40]:
+    print(f"{word:<20} {mp*100:>7.2f}% {nmp*100:>9.2f}% {ratio:>8.1f}x {count:>6}")
+
+
+# Finds two-word phrases distinctive to misogynistic replies
+
+def get_bigrams(texts):
+    bigrams = []
+    for text in texts.dropna():
+        normalized = normalize_text(str(text))
+        words = [w for w in re.findall(r'\b[a-z]{2,}\b', normalized) if w not in stopwords]
+        bigrams.extend(zip(words, words[1:]))
+    return Counter(bigrams)
+
+misog_bigrams    = get_bigrams(misogynistic_df['Reply'])
+nonmisog_bigrams = get_bigrams(non_misogynistic_df['Reply'])
+
+total_misog_bi    = sum(misog_bigrams.values()) or 1
+total_nonmisog_bi = sum(nonmisog_bigrams.values()) or 1
+
+print("\n─── TOP BIGRAMS IN MISOGYNISTIC REPLIES ───")
+print(f"{'Bigram':<30} {'Misog%':>8} {'NonMisog%':>10} {'Ratio':>8} {'Count':>7}")
+print("─" * 70)
+
+bigram_scores = []
+for bigram, count in misog_bigrams.most_common(1000):
+    if count < 3:
+        continue
+    mp   = count / total_misog_bi
+    nmp  = (nonmisog_bigrams.get(bigram, 0) + 1) / total_nonmisog_bi
+    ratio = mp / nmp
+    bigram_scores.append((bigram, count, mp, nmp, ratio))
+
+bigram_scores.sort(key=lambda x: x[4], reverse=True)
+for bigram, count, mp, nmp, ratio in bigram_scores[:30]:
+    phrase = ' '.join(bigram)
+    print(f"{phrase:<30} {mp*100:>7.2f}% {nmp*100:>9.2f}% {ratio:>8.1f}x {count:>6}")
+
+
+# Specifically looks at what your classifier is MISSING
+
+fn_df = df[(df['actual_binary'] != 0) & (df['predicted_binary'] == 0)].copy()
+
+print(f"\n─── PATTERN MINING: FALSE NEGATIVES (n={len(fn_df)}) ───")
+print("These are misogynistic replies your classifier currently misses\n")
+
+fn_freq    = get_word_freq(fn_df['Reply'])
+fn_bigrams = get_bigrams(fn_df['Reply'])
+total_fn   = sum(fn_freq.values()) or 1
+total_fn_bi = sum(fn_bigrams.values()) or 1
+
+print("Top distinctive UNIGRAMS in missed replies:")
+print(f"{'Word':<20} {'FN%':>7} {'NonMisog%':>10} {'Ratio':>8} {'Count':>6}")
+print("─" * 55)
+
+fn_word_scores = []
+for word, count in fn_freq.most_common(300):
+    if count < 2:
+        continue
+    fp_pct   = count / total_fn
+    nmp      = (nonmisog_freq.get(word, 0) + 1) / total_nonmisog
+    ratio    = fp_pct / nmp
+    fn_word_scores.append((word, count, fp_pct, nmp, ratio))
+
+fn_word_scores.sort(key=lambda x: x[4], reverse=True)
+for word, count, fp_pct, nmp, ratio in fn_word_scores[:25]:
+    print(f"{word:<20} {fp_pct*100:>6.2f}% {nmp*100:>9.2f}% {ratio:>8.1f}x {count:>5}")
+
+print("\nTop distinctive BIGRAMS in missed replies:")
+print(f"{'Bigram':<30} {'FN%':>7} {'NonMisog%':>10} {'Ratio':>8} {'Count':>6}")
+print("─" * 65)
+
+fn_bigram_scores = []
+for bigram, count in fn_bigrams.most_common(500):
+    if count < 2:
+        continue
+    fp_pct = count / total_fn_bi
+    nmp    = (nonmisog_bigrams.get(bigram, 0) + 1) / total_nonmisog_bi
+    ratio  = fp_pct / nmp
+    fn_bigram_scores.append((bigram, count, fp_pct, nmp, ratio))
+
+fn_bigram_scores.sort(key=lambda x: x[4], reverse=True)
+for bigram, count, fp_pct, nmp, ratio in fn_bigram_scores[:20]:
+    phrase = ' '.join(bigram)
+    print(f"{phrase:<30} {fp_pct*100:>6.2f}% {nmp*100:>9.2f}% {ratio:>8.1f}x {count:>5}")
+
+
+# Compares what language looks like in code 2 vs code 3
+
+explicit_df = df[explicit_actual].copy()
+implicit_df = df[implicit_actual].copy()
+
+explicit_freq = get_word_freq(explicit_df['Reply'])
+implicit_freq = get_word_freq(implicit_df['Reply'])
+
+total_exp = sum(explicit_freq.values()) or 1
+total_imp = sum(implicit_freq.values()) or 1
+
+print("\n─── WORDS MORE COMMON IN EXPLICIT (code 2) vs IMPLICIT (code 3) ───")
+print(f"{'Word':<20} {'Explicit%':>10} {'Implicit%':>10} {'Ratio':>8}")
+print("─" * 55)
+
+exp_vs_imp = []
+for word in set(explicit_freq) | set(implicit_freq):
+    exp_pct = (explicit_freq.get(word, 0) + 1) / total_exp
+    imp_pct = (implicit_freq.get(word, 0) + 1) / total_imp
+    if explicit_freq.get(word, 0) >= 3:
+        exp_vs_imp.append((word, exp_pct, imp_pct, exp_pct / imp_pct))
+
+exp_vs_imp.sort(key=lambda x: x[3], reverse=True)
+print("  >> More explicit:")
+for word, ep, ip, ratio in exp_vs_imp[:15]:
+    print(f"  {word:<20} {ep*100:>9.2f}% {ip*100:>9.2f}% {ratio:>8.1f}x")
+
+print("  >> More implicit:")
+for word, ep, ip, ratio in sorted(exp_vs_imp, key=lambda x: x[3])[:15]:
+    print(f"  {word:<20} {ep*100:>9.2f}% {ip*100:>9.2f}% {ratio:>8.1f}x")
+
+
+#export 
+discovery_rows = []
+for word, count, mp, nmp, ratio in word_scores[:100]:
+    discovery_rows.append({
+        'type': 'unigram', 'term': word, 'count_misogynistic': count,
+        'pct_misogynistic': round(mp*100, 3),
+        'pct_non_misogynistic': round(nmp*100, 3),
+        'ratio': round(ratio, 2), 'source': 'all_misogynistic'
+    })
+for bigram, count, mp, nmp, ratio in bigram_scores[:100]:
+    discovery_rows.append({
+        'type': 'bigram', 'term': ' '.join(bigram), 'count_misogynistic': count,
+        'pct_misogynistic': round(mp*100, 3),
+        'pct_non_misogynistic': round(nmp*100, 3),
+        'ratio': round(ratio, 2), 'source': 'all_misogynistic'
+    })
+for word, count, fp_pct, nmp, ratio in fn_word_scores[:50]:
+    discovery_rows.append({
+        'type': 'unigram', 'term': word, 'count_misogynistic': count,
+        'pct_misogynistic': round(fp_pct*100, 3),
+        'pct_non_misogynistic': round(nmp*100, 3),
+        'ratio': round(ratio, 2), 'source': 'false_negatives'
+    })
+
+discovery_df = pd.DataFrame(discovery_rows)
+discovery_df.to_csv("pattern_discovery.csv", index=False)
+print("\n✓ Saved pattern_discovery.csv")
